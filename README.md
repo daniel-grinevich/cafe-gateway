@@ -134,11 +134,9 @@ curl -s $URL/v1/admin/spend -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"   # 
   - Example alert: `cafe_gateway_cap_used_ratio > 0.8`.
 - **`data_collection: deny`** is forced onto every OpenRouter request (`OPENROUTER_DATA_COLLECTION`). A caller can't
   override it.
-- **Use a separate OpenRouter key per environment, each with an OpenRouter-side credit limit.** The gateway's caps
-  protect against callers. The credit limit on the key itself (openrouter.ai → Keys → credit limit) is the last line
-  of defense if the gateway is misconfigured or has a bug. It also lets you revoke staging without touching
-  production. For now one key is shared by staging and production, so give that key a credit limit no higher than
-  the sum of both environments' caps.
+- **Give the gateway its own OpenRouter key with an OpenRouter-side credit limit.** The gateway's caps protect
+  against callers. The credit limit on the key itself (openrouter.ai → Keys → credit limit) is the last line of
+  defense if the gateway is misconfigured or has a bug. Set it no higher than the sum of the two service caps.
 
 ## Configuration
 
@@ -172,15 +170,16 @@ golangci-lint run ./...
 
 ## Deploying
 
-The flow is the same as crumb's: GitHub Actions builds an arm64 image and updates
-[rainbow-road](https://github.com/daniel-grinevich/rainbow-road) using `RAINBOW_ROAD_PAT`.
+cafe-gateway runs in production only; there is no staging environment. GitHub Actions
+(`.github/workflows/deploy-production.yml`) does the release:
 
-- **Staging:** move the `staging` tag to a commit on `main`:
-  `git tag -f staging <commit> && git push -f origin staging`. CI pushes `staging-latest` and `staging-<sha>`, then
-  updates the `navi.dev/deployed-sha` annotation in `staging/cafe-gateway`. That annotation rolls both the barista
-  and grinder deployments.
-- **Production:** tag a commit on `main` with `vX.Y.Z`. CI pushes image `X.Y.Z` (plus `prod-latest` and
-  `prod-<sha>`) and updates `newTag` in `production/cafe-gateway`. Production ArgoCD sync is manual.
+1. Tag a commit on `main` with `vX.Y.Z` and push the tag: `git tag v1.2.3 <commit> && git push origin v1.2.3`.
+2. CI checks that the commit is on `main` and builds the arm64 image. It pushes `X.Y.Z`, plus `prod-latest` and
+   `prod-<sha>`.
+3. CI bumps `newTag` to `X.Y.Z` in [rainbow-road](https://github.com/daniel-grinevich/rainbow-road)
+   `production/cafe-gateway/kustomization.yaml`, using `RAINBOW_ROAD_PAT`.
+4. Sync the `cafe-gateway-production` app by hand in ArgoCD (production is manual sync). Syncing rolls both the
+   barista and grinder deployments.
 
 Both deployments run `cafe-gateway migrate` as an init container. It is idempotent and takes an advisory lock.
 
