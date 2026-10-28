@@ -40,7 +40,9 @@ func (e *APIError) header(k, v string) *APIError {
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false) // JSON for API clients, never embedded in HTML: keep < > & readable
+	if err := enc.Encode(body); err != nil {
 		slog.Debug("write response", "error", err)
 	}
 }

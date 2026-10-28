@@ -7,6 +7,13 @@ import (
 	"github.com/daniel-grinevich/cafe-gateway/internal/config"
 )
 
+// decisionQuestionsDoc is OpenRouter's question schema (DecisionsRequest in https://openrouter.ai/openapi.json).
+const decisionQuestionsDoc = `{"<key>": question}. Every question needs "type" and "instructions" (string, object or array). ` +
+	`noul (yes/no): optional "criteria": {"true": "...", "false": "..."}; the answer "noul" is the probability of true (0-1). ` +
+	`choice: "criteria": {"<option>": "<when to pick it>", ...} (an object, not a list); the answer is "choice": "<option>" with "probabilities" per option. ` +
+	`score: "criteria": ["<lowest>", ..., "<highest>"] (ordered, at least one); the answer "score" is a number from 0 to len-1 with a "legend". ` +
+	`box: instructions only (needs an image asset); the answer "box" is {top, bottom, left, right}.`
+
 func errorResponse(desc string) map[string]any {
 	return map[string]any{"description": desc, "content": map[string]any{"application/json": map[string]any{
 		"schema": map[string]any{"$ref": "#/components/schemas/Error"},
@@ -41,8 +48,10 @@ func (g *Gateway) openapiSpec() map[string]any {
 				"properties": map[string]any{
 					"model":     map[string]any{"type": "string", "enum": models},
 					"state":     map[string]any{"description": "The situation to decide about (string or JSON)."},
-					"questions": map[string]any{"type": "object", "description": "{<key>: {type: noul|choice|score|box, instructions?, criteria?}}"},
-					"assets":    map[string]any{"type": "array"},
+					"questions": map[string]any{"type": "object", "description": decisionQuestionsDoc},
+					"assets": map[string]any{"type": "object", "description": `Images keyed by reference: {"<ref>": {"type": "image", ` +
+						`"format": "png|jpg|jpeg", "data_base64": "<base64, no data: prefix>"}}. Use "<ref>" as a whole string ` +
+						`in state, instructions or criteria; every asset must be referenced.`},
 				},
 			}}}},
 		}
@@ -118,6 +127,11 @@ Your key starts with <code>{{.Prefix}}_</code>. Default model <code>{{index .Mod
 <p>Every call needs <code>X-AGENT-SURFACE</code> (where it comes from) and <code>X-AGENT-ID</code> (your app/agent name).
 The response carries <code>X-Cost-Usd</code> and <code>X-Budget-Remaining-Usd</code>.</p>
 <pre><code>{{.Example}}</code></pre>
+{{if eq .Service "barista"}}<p>Question types: every question needs <code>type</code> and <code>instructions</code>.
+<code>noul</code> (yes/no; optional <code>criteria</code> <code>{"true": …, "false": …}</code>; answer = probability of true),
+<code>choice</code> (<code>criteria</code> is an object <code>{"option": "when to pick it"}</code>),
+<code>score</code> (<code>criteria</code> is an ordered list, lowest first; answer is 0…n-1),
+<code>box</code> (instructions only, with an image asset; answer is <code>{top, bottom, left, right}</code>).</p>{{end}}
 <p>Your usage this month: <code>GET /v1/usage?by=surface</code>. Machine-readable spec: <a href="/openapi.json">/openapi.json</a>.</p>
 </body></html>`))
 
@@ -126,7 +140,17 @@ func (g *Gateway) docs(w http.ResponseWriter, r *http.Request) {
   -H "Authorization: Bearer $BARISTA_KEY" \
   -H "X-AGENT-SURFACE: cli" -H "X-AGENT-ID: my-script" \
   -H "Content-Type: application/json" \
-  -d '{"state": "3 open bugs, demo tomorrow", "questions": {"ship": {"type": "noul"}}}'`
+  -d '{
+    "state": "3 open bugs, demo tomorrow",
+    "questions": {
+      "ship": {"type": "noul", "instructions": "Should we ship today?",
+               "criteria": {"true": "The bugs are minor.", "false": "A bug would break the demo."}},
+      "first": {"type": "choice", "instructions": "Which bug first?",
+                "criteria": {"login": "Users can't sign in.", "export": "CSV export is wrong."}},
+      "urgency": {"type": "score", "instructions": "How urgent is the fix?",
+                  "criteria": ["Can wait", "This week", "Right now"]}
+    }
+  }'`
 	if g.service() == config.Grinder {
 		example = `curl -s https://$HOST/v1/embed \
   -H "Authorization: Bearer $GRINDER_KEY" \

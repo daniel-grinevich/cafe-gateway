@@ -13,9 +13,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/shopspring/decimal"
 
@@ -173,10 +175,14 @@ func (g *Gateway) buildDecide(payload map[string]any) (*call, *APIError) {
 		switch k {
 		case "model":
 		case "assets":
-			// Images are priced per image, not per base64 character.
-			if list, ok := v.([]any); ok {
-				assets = len(list)
-			} else if v != nil {
+			// {"<ref>": {type, format, data_base64}}. Images are priced per image, not per base64 character.
+			switch a := v.(type) {
+			case map[string]any:
+				assets = len(a)
+			case []any:
+				assets = len(a)
+			case nil:
+			default:
 				assets = 1
 			}
 		default:
@@ -409,29 +415,112 @@ func (g *Gateway) handleModelCall(ctx context.Context, key *store.APIKey, h http
 	return out, nil
 }
 
+// upstreamError maps an OpenRouter error to the caller's error. For the caller's own mistakes (400-class) it
+// passes OpenRouter's reason through, sanitized, so they can fix the request.
 func upstreamError(ctx context.Context, up *openrouter.Response) *APIError {
-	message := "OpenRouter returned an error."
-	var body struct {
-		Error struct {
-			Message any `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(up.Body, &body) == nil && body.Error.Message != nil {
-		if s, ok := body.Error.Message.(string); ok && s != "" {
-			message = s
-		}
-	}
+	message, detail := upstreamReason(up.Body)
 	switch up.Status {
 	case 400, 404, 413, 422:
-		// The caller's request was bad; pass the reason through.
-		return apiError(up.Status, "upstream_rejected", message).with("upstream_status", up.Status)
+		full := "OpenRouter rejected the request: " + message
+		if detail != "" {
+			full += " (" + detail + ")"
+		}
+		slog.InfoContext(ctx, "OpenRouter rejected a request", "status", up.Status, "message", message, "detail", detail)
+		e := apiError(up.Status, "upstream_rejected", full).with("upstream_status", up.Status).with("upstream_message", message)
+		if detail != "" {
+			e = e.with("upstream_detail", detail)
+		}
+		return e
 	case 401, 402, 403:
 		// Our OpenRouter key or credits, not the caller's fault. Don't leak details.
-		slog.ErrorContext(ctx, "OpenRouter refused the gateway's key", "status", up.Status, "message", message)
+		slog.ErrorContext(ctx, "OpenRouter refused the gateway's key", "status", up.Status, "message", message, "detail", detail)
 		return apiError(http.StatusBadGateway, "upstream_auth", "The gateway's upstream account was refused.")
 	case 429:
 		return apiError(http.StatusServiceUnavailable, "upstream_rate_limited", "OpenRouter is rate limiting; retry shortly.").
 			header("Retry-After", "5")
 	}
+	slog.WarnContext(ctx, "OpenRouter error", "status", up.Status, "message", message, "detail", detail)
 	return apiError(http.StatusBadGateway, "upstream_error", message).with("upstream_status", up.Status)
+}
+
+const maxUpstreamText = 600
+
+// upstreamReason pulls (message, detail) out of an OpenRouter error body {"error": {"code", "message", "metadata"}},
+// both sanitized. metadata usually holds the specifics (e.g. metadata.raw from the provider).
+func upstreamReason(raw []byte) (string, string) {
+	var body struct {
+		Error json.RawMessage `json:"error"`
+	}
+	message, detail := "OpenRouter returned an error.", ""
+	if json.Unmarshal(raw, &body) != nil || len(body.Error) == 0 {
+		return message, ""
+	}
+	var asString string
+	if json.Unmarshal(body.Error, &asString) == nil {
+		if m := sanitizeUpstream(asString); m != "" {
+			message = m
+		}
+		return message, ""
+	}
+	var e struct {
+		Message  any `json:"message"`
+		Metadata any `json:"metadata"`
+	}
+	if json.Unmarshal(body.Error, &e) != nil {
+		return message, ""
+	}
+	if m := sanitizeUpstream(textOf(e.Message)); m != "" {
+		message = m
+	}
+	if md, ok := e.Metadata.(map[string]any); ok {
+		// The provider's own words, if present, are the most useful part; otherwise show the whole metadata.
+		if r := textOf(md["raw"]); r != "" {
+			detail = r
+		} else if len(md) > 0 {
+			detail = textOf(md)
+		}
+	} else if e.Metadata != nil {
+		detail = textOf(e.Metadata)
+	}
+	detail = sanitizeUpstream(detail)
+	if detail == message {
+		detail = ""
+	}
+	return message, detail
+}
+
+func textOf(v any) string {
+	switch v := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`sk-or-[A-Za-z0-9_-]+`),
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`\b(bar|grd)_[a-z0-9]{12}_[A-Za-z0-9_-]+`),
+}
+
+// sanitizeUpstream makes upstream text safe to show a caller: no key-like strings, no control characters, one
+// line, bounded length.
+func sanitizeUpstream(s string) string {
+	for _, re := range secretPatterns {
+		s = re.ReplaceAllString(s, "[redacted]")
+	}
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > maxUpstreamText {
+		s = string(r[:maxUpstreamText]) + "…"
+	}
+	return s
 }

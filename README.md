@@ -33,16 +33,50 @@ curl -s https://barista.tailf9a785.ts.net/v1/decide \
   -H "X-AGENT-SURFACE: cli" -H "X-AGENT-ID: my-script" \
   -H "Content-Type: application/json" \
   -d '{
-        "state": "We have 3 open bugs and a demo tomorrow.",
+        "state": {"bugs": ["login fails on Safari", "CSV export drops a column", "typo on pricing page"],
+                  "demo": "tomorrow 10:00"},
         "questions": {
-          "ship":     {"type": "noul", "instructions": "Should we ship today?"},
-          "priority": {"type": "choice", "instructions": "Which first?", "criteria": ["bug 1", "bug 2", "bug 3"]}
+          "ship": {
+            "type": "noul",
+            "instructions": "Should we ship today?",
+            "criteria": {"true": "None of the bugs affects the demo.", "false": "A bug would break the demo."}
+          },
+          "first": {
+            "type": "choice",
+            "instructions": "Which bug should we fix first?",
+            "criteria": {
+              "login":   "Users can't sign in.",
+              "export":  "Exports are wrong but usable.",
+              "pricing": "Cosmetic only."
+            }
+          },
+          "urgency": {
+            "type": "score",
+            "instructions": "How urgent is the login bug?",
+            "criteria": ["Can wait for the next release", "Fix this week", "Fix before the demo"]
+          }
         }
       }'
 ```
 
-The body goes to OpenRouter's Decisions API unchanged (`model`, `state`, `questions`, `assets`, `session_id`, …).
-The response is OpenRouter's `{id, model, answers, usage}`.
+The body goes to OpenRouter's Decisions API unchanged: `model`, `state`, `questions`, `assets`, `session_id`, and so
+on. `state`, `instructions` and every criterion can be a string, an object or an array. The schema of each question
+type (from [OpenRouter's API reference](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request)):
+
+| `type` | required fields | `criteria` | answer |
+|---|---|---|---|
+| `noul` (yes/no) | `instructions` | optional object `{"true": …, "false": …}` | `"noul": 0.96`, the probability that the answer is true (0–1) |
+| `choice` | `instructions`, `criteria` | **object** `{"<option>": "<when to pick it>", …}`, not a list | `"choice": "<option>"`, with `probabilities` per option and `confidence` |
+| `score` | `instructions`, `criteria` | ordered **list**, lowest first, at least 1 item | `"score": 1.99`, the expected index from 0 to n−1, with `legend` (`{"0": …}`), `probabilities` and `confidence` |
+| `box` | `instructions` | none; reference an image asset | `"box": {"top", "bottom", "left", "right"}` with `confidence` |
+
+Images go in `assets` as an object keyed by reference:
+`"assets": {"shot1": {"type": "image", "format": "png", "data_base64": "<base64, no data: prefix>"}}`. Write
+`"shot1"` as a whole string wherever the image belongs (in `state`, `instructions` or `criteria`). Every asset must be
+referenced.
+
+The response is OpenRouter's `{id, model, provider, answers, usage}`. If OpenRouter rejects the request, you get
+`400 upstream_rejected` with OpenRouter's reason in `message` and `upstream_detail`.
 
 **grinder (embeddings):**
 
@@ -72,6 +106,7 @@ Every successful call returns `X-Cost-Usd` (what that call cost) and `X-Budget-R
 |---|---|---|
 | 400 | `missing_header`, `invalid_header` | send `X-AGENT-SURFACE` and `X-AGENT-ID` |
 | 400 | `model_not_allowed` | the response lists `allowed_models` |
+| 400 | `upstream_rejected` | OpenRouter refused the body (e.g. a `choice` with list criteria); `message` and `upstream_detail` say why |
 | 401 | `missing_api_key`, `invalid_api_key`, `revoked_api_key` | |
 | 402 | `budget_exceeded` | your key's monthly budget is used up (it resets on the 1st, UTC) |
 | 402 | `service_budget_exceeded` | the service hit its global monthly cap |
@@ -155,7 +190,7 @@ You need Docker. Go 1.25 is optional, since everything runs in containers.
 docker compose up --build -d      # barista :8051, grinder :8052, Postgres :5444, mock OpenRouter (no real spend)
 docker compose run --rm barista keys create --service barista --name me
 curl -s localhost:8051/v1/decide -H "Authorization: Bearer bar_…" -H "X-AGENT-SURFACE: cli" -H "X-AGENT-ID: me" \
-  -d '{"state": "s", "questions": {"q": {"type": "noul"}}}'
+  -d '{"state": "s", "questions": {"q": {"type": "noul", "instructions": "Is s a letter?"}}}'
 open http://localhost:8051/docs
 ```
 
