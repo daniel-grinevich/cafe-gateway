@@ -1,0 +1,71 @@
+# Local stack: barista on :8051, grinder on :8052, Postgres on :5444, and a mock OpenRouter so nothing costs money.
+#   docker compose up --build -d
+#   docker compose run --rm barista keys create --service barista --name me
+# To use the real OpenRouter instead, put OPEN_ROUTER_KEY, OPENROUTER_BASE_URL=https://openrouter.ai/api/v1 and
+# OPENROUTER_DECISIONS_URL=https://openrouter.ai/api/alpha/decisions in .env.local and run with
+#   docker compose --env-file .env.local up -d
+name: cafe-gateway
+
+x-app: &app
+  build: .
+  image: cafe-gateway:local
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  environment: &app-env
+    DATABASE_URL: postgresql://cafe_gateway:cafe_gateway@postgres:5432/cafe_gateway?sslmode=disable
+    OPEN_ROUTER_KEY: ${OPEN_ROUTER_KEY:-sk-or-mock}
+    OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-http://mock-openrouter:8090/api/v1}
+    OPENROUTER_DECISIONS_URL: ${OPENROUTER_DECISIONS_URL:-http://mock-openrouter:8090/api/alpha/decisions}
+    BARISTA_ADMIN_TOKEN: ${BARISTA_ADMIN_TOKEN:-local-admin-token}
+    BARISTA_MONTHLY_CAP_USD: ${BARISTA_MONTHLY_CAP_USD:-2}
+    GRINDER_MONTHLY_CAP_USD: ${GRINDER_MONTHLY_CAP_USD:-2}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cafe_gateway
+      POSTGRES_USER: cafe_gateway
+      POSTGRES_PASSWORD: cafe_gateway
+    ports: ["5444:5432"]
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cafe_gateway -d cafe_gateway"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  mock-openrouter:
+    build:
+      context: .
+      target: mock-openrouter
+    image: cafe-gateway-mock-openrouter:local
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["migrate"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  barista:
+    <<: *app
+    environment:
+      <<: *app-env
+      BARISTA_SERVICE: barista
+    ports: ["8051:8000"]
+
+  grinder:
+    <<: *app
+    environment:
+      <<: *app-env
+      BARISTA_SERVICE: grinder
+    ports: ["8052:8000"]
+
+volumes:
+  postgres:

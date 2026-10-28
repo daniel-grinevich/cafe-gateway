@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ['main']
+    paths-ignore: ['docs/**', '**.md']
+
+  push:
+    branches: ['main']
+    paths-ignore: ['docs/**', '**.md']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      # staticcheck, errcheck, gosec, revive, ... (.golangci.yml) plus gofmt/goimports.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+
+  # Tests run on the runner against a Postgres service container. Each database test
+  # creates (and drops) its own database on it (internal/testdb, BARISTA_TEST_ADMIN_DSN);
+  # OpenRouter is always a local httptest mock.
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cafe_gateway
+          POSTGRES_PASSWORD: cafe_gateway
+          POSTGRES_DB: cafe_gateway
+        ports: ['5444:5432']
+        options: >-
+          --health-cmd "pg_isready -U cafe_gateway -d cafe_gateway"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+
+    env:
+      BARISTA_TEST_ADMIN_DSN: postgres://cafe_gateway:cafe_gateway@localhost:5444/cafe_gateway?sslmode=disable
+      # Fail instead of skipping database tests if the DSN is missing.
+      BARISTA_TEST_REQUIRE_DB: '1'
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+  # Proves the image we ship still builds, on the same arch as the cluster.
+  # The layer cache is only written on pushes, so PRs don't pay the upload.
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha,scope=cafe-gateway
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,scope=cafe-gateway,mode=max' || '' }}
