@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 var decisionBody = map[string]any{
 	"id":      "dec-1",
 	"model":   "perplexity/pplx-decider-flash-v1.2",
-	"answers": map[string]any{"ship": map[string]any{"type": "noul", "noul": "yes"}},
+	"answers": map[string]any{"ship": map[string]any{"type": "noul", "noul": 0.96}},
 	"usage":   map[string]any{"input_tokens": 120, "output_tokens": 8, "cost": 0.0004},
 }
 
@@ -46,7 +46,7 @@ var embeddingBody = map[string]any{
 }
 
 var (
-	decide = map[string]any{"state": "We have 3 open bugs and a demo tomorrow.", "questions": map[string]any{"ship": map[string]any{"type": "noul"}}}
+	decide = map[string]any{"state": "We have 3 open bugs and a demo tomorrow.", "questions": map[string]any{"ship": map[string]any{"type": "noul", "instructions": "Ship today?"}}}
 	embed  = map[string]any{"input": []string{"espresso", "latte"}}
 )
 

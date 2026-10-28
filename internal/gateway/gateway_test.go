@@ -3,8 +3,11 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"html"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/daniel-grinevich/cafe-gateway/internal/config"
+	"github.com/daniel-grinevich/cafe-gateway/internal/mockopenrouter"
 	"github.com/daniel-grinevich/cafe-gateway/internal/openrouter"
 	"github.com/daniel-grinevich/cafe-gateway/internal/store"
 	"github.com/daniel-grinevich/cafe-gateway/internal/testdb"
@@ -473,7 +477,7 @@ func TestUpstreamErrorsAreMapped(t *testing.T) {
 func TestModelAllowList(t *testing.T) {
 	e := newEnv(t, config.Barista, with("BARISTA_MODELS", "perplexity/pplx-decider-flash-v1.2, perplexity/other"))
 	key := e.makeKey(config.Barista, map[string]any{"rpm": 100})
-	body := map[string]any{"state": "s", "questions": map[string]any{"q": map[string]any{"type": "noul"}}, "model": "openai/gpt-5"}
+	body := map[string]any{"state": "s", "questions": map[string]any{"q": map[string]any{"type": "noul", "instructions": "?"}}, "model": "openai/gpt-5"}
 	r := e.post("/v1/decide", body, caller(key))
 	expect(t, r, 400, "model_not_allowed")
 	if m := r.json(t)["error"].(map[string]any)["allowed_models"].([]any); len(m) != 2 {
@@ -718,4 +722,86 @@ func TestHealthDocsAndOpenAPI(t *testing.T) {
 		t.Fatal("docs lack the example")
 	}
 	expect(t, e.do("GET", "/nope", nil, nil), http.StatusNotFound, "not_found")
+}
+
+// --- OpenRouter's Decisions schema ---
+
+func TestUpstreamRejectedPassesTheReasonThrough(t *testing.T) {
+	e := newEnv(t, config.Barista)
+	e.upstream.reply(decisionsPath, upstreamReply{400, map[string]any{"error": map[string]any{
+		"code": 400, "message": "Invalid request parameters",
+		"metadata": map[string]any{"raw": "questions.first.criteria: expected object, received array\n(key sk-or-v1-abc123 Bearer abc.def)"},
+	}}})
+	key := e.makeKey(config.Barista, nil)
+	r := e.post("/v1/decide", decide, caller(key))
+	expect(t, r, 400, "upstream_rejected")
+	errBody := r.json(t)["error"].(map[string]any)
+	if errBody["upstream_message"] != "Invalid request parameters" {
+		t.Fatalf("upstream_message = %v", errBody["upstream_message"])
+	}
+	detail, _ := errBody["upstream_detail"].(string)
+	msg, _ := errBody["message"].(string)
+	if !strings.Contains(detail, "expected object, received array") || !strings.Contains(msg, "expected object, received array") {
+		t.Fatalf("reason not passed through: %s", r.body)
+	}
+	if bytes.Contains(r.body, []byte("sk-or-v1-abc123")) || bytes.Contains(r.body, []byte("abc.def")) || strings.Contains(detail, "\n") {
+		t.Fatalf("not sanitized: %s", r.body)
+	}
+}
+
+func TestUpstreamReasonShapes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body            string
+		message, detail string
+	}{
+		"string error":         {`{"error": "bad thing"}`, "bad thing", ""},
+		"message only":         {`{"error": {"code": 400, "message": "criteria required"}}`, "criteria required", ""},
+		"metadata without raw": {`{"error": {"code": 400, "message": "Invalid", "metadata": {"issues": [{"path": "questions.q"}]}}}`, "Invalid", `{"issues":[{"path":"questions.q"}]}`},
+		"not an error body":    {`{"oops": 1}`, "OpenRouter returned an error.", ""},
+		"long raw is capped":   {`{"error": {"message": "m", "metadata": {"raw": "` + strings.Repeat("x", 2000) + `"}}}`, "m", strings.Repeat("x", maxUpstreamText) + "…"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, d := upstreamReason([]byte(tc.body))
+			if m != tc.message || d != tc.detail {
+				t.Fatalf("got (%q, %q)", m, d)
+			}
+		})
+	}
+}
+
+func TestAssetsObjectCountsPerImage(t *testing.T) {
+	e := newEnv(t, config.Barista)
+	key := e.makeKey(config.Barista, map[string]any{"max_tokens_per_request": 1500})
+	body := map[string]any{
+		"state":     "shot1 vs shot2",
+		"questions": map[string]any{"q": map[string]any{"type": "noul", "instructions": "Same image?"}},
+		"assets": map[string]any{
+			"shot1": map[string]any{"type": "image", "format": "png", "data_base64": "iVBORw0KGgo="},
+			"shot2": map[string]any{"type": "image", "format": "png", "data_base64": "iVBORw0KGgo="},
+		},
+	}
+	r := e.post("/v1/decide", body, caller(key))
+	expect(t, r, 413, "too_many_tokens")
+	if est := r.json(t)["error"].(map[string]any)["estimated_tokens"].(float64); est < 2000 {
+		t.Fatalf("two images should count ~2000 tokens, got %v", est)
+	}
+}
+
+// The example on /docs must be accepted by a schema-checking OpenRouter stand-in, end to end through the gateway.
+func TestDocsExampleIsAValidDecisionsRequest(t *testing.T) {
+	or := httptest.NewServer(mockopenrouter.Handler())
+	t.Cleanup(or.Close)
+	e := newEnv(t, config.Barista, with("OPENROUTER_DECISIONS_URL", or.URL+"/api/alpha/decisions"))
+	page := html.UnescapeString(string(e.do("GET", "/docs", nil, nil).body))
+	m := regexp.MustCompile(`(?s)-d '(\{.*?\})'`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("no curl body on /docs: %s", page)
+	}
+	key := e.makeKey(config.Barista, nil)
+	r := e.post("/v1/decide", m[1], merge(caller(key), map[string]string{"Content-Type": "application/json"}))
+	expect(t, r, 200, "")
+	answers := r.json(t)["answers"].(map[string]any)
+	if len(answers) != 3 || answers["first"].(map[string]any)["type"] != "choice" {
+		t.Fatalf("answers = %v", answers)
+	}
 }
