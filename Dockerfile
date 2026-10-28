@@ -19,7 +19,8 @@ ENTRYPOINT ["mock-openrouter"]
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/cafe-gateway /usr/local/bin/cafe-gateway
-EXPOSE 8000
+# 8000: the API (tailnet). 9090: internal-only /metrics with per-key labels (cluster scrape only).
+EXPOSE 8000 9090
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s CMD ["cafe-gateway", "healthcheck"]
 ENTRYPOINT ["cafe-gateway"]
 CMD ["serve"]

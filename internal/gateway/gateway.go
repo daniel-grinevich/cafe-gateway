@@ -42,13 +42,15 @@ type Gateway struct {
 	Pricing *openrouter.Pricing
 	Limiter *ratelimit.Limiter
 	Metrics *metrics.Metrics
-	Now     func() time.Time
+	// Per-key metrics, served only on the internal listener.
+	Users *metrics.Users
+	Now   func() time.Time
 }
 
 func New(cfg *config.Config, st *store.Store, client *openrouter.Client) *Gateway {
 	return &Gateway{
 		Cfg: cfg, Store: st, Client: client, Pricing: openrouter.NewPricing(cfg, client),
-		Limiter: ratelimit.New(nil), Metrics: metrics.New(), Now: time.Now,
+		Limiter: ratelimit.New(nil), Metrics: metrics.New(), Users: metrics.NewUsers(), Now: time.Now,
 	}
 }
 
@@ -95,7 +97,7 @@ func (g *Gateway) authenticate(ctx context.Context, h http.Header) (*store.APIKe
 			" key; it only works on "+string(key.Service)+", not "+string(g.service())+".")
 	}
 	if info := requestInfoFrom(ctx); info != nil {
-		info.keyID = key.KeyID
+		info.keyID, info.keyName = key.KeyID, key.Name
 	}
 	return key, nil
 }
@@ -289,6 +291,9 @@ func (g *Gateway) handleModelCall(ctx context.Context, key *store.APIKey, h http
 			row.ErrorCode = e.Code
 		}
 		row.LatencyMS = int(time.Since(started).Milliseconds())
+		if info := requestInfoFrom(ctx); info != nil {
+			info.model, info.inputTokens, info.outputTokens, info.costUSD = row.Model, row.InputTokens, row.OutputTokens, row.CostUSD
+		}
 	}
 	reject := func(e *APIError) (*result, *APIError) {
 		finish(e.Status, e)

@@ -58,14 +58,14 @@ services:
     environment:
       <<: *app-env
       BARISTA_SERVICE: barista
-    ports: ["8051:8000"]
+    ports: ["8051:8000", "127.0.0.1:9051:9090"]
 
   grinder:
     <<: *app
     environment:
       <<: *app-env
       BARISTA_SERVICE: grinder
-    ports: ["8052:8000"]
+    ports: ["8052:8000", "127.0.0.1:9052:9090"]
 
 volumes:
   postgres:

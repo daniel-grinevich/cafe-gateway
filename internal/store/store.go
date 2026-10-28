@@ -178,11 +178,12 @@ func (k *APIKey) JSON() KeyJSON {
 const keyColumns = `id::text, key_id, service, key_hash, name, scopes, rpm, max_tokens_per_request,
 	monthly_budget_usd::text, created_at, last_used_at, revoked_at`
 
-func scanKey(row pgx.Row) (*APIKey, error) {
+func scanKey(row pgx.Row, extra ...any) (*APIKey, error) {
 	var k APIKey
 	var service, budget string
-	err := row.Scan(&k.ID, &k.KeyID, &service, &k.KeyHash, &k.Name, &k.Scopes, &k.RPM, &k.MaxTokensPerRequest,
-		&budget, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt)
+	dest := []any{&k.ID, &k.KeyID, &service, &k.KeyHash, &k.Name, &k.Scopes, &k.RPM, &k.MaxTokensPerRequest,
+		&budget, &k.CreatedAt, &k.LastUsedAt, &k.RevokedAt}
+	err := row.Scan(append(dest, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -482,4 +483,37 @@ func (s *Store) KeySpend(ctx context.Context, key *APIKey, now time.Time) (decim
 func (s *Store) PruneReservations(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.Pool.Exec(ctx, "DELETE FROM reservations WHERE expires_at <= $1", now)
 	return tag.RowsAffected(), err
+}
+
+// KeySpend is an active key with its recorded spend this month.
+type KeySpend struct {
+	Key   *APIKey
+	Spent decimal.Decimal
+}
+
+// ActiveKeySpends returns every unrevoked key of a service with this month's spend (for per-key budget gauges).
+func (s *Store) ActiveKeySpends(ctx context.Context, service config.Service, now time.Time) ([]KeySpend, error) {
+	_, start, end, _ := MonthBounds("", now)
+	rows, err := s.Pool.Query(ctx, "SELECT "+keyColumns+`,
+		(SELECT coalesce(sum(u.cost_usd), 0)::text FROM usage u
+		 WHERE u.api_key_id = api_keys.id AND u.created_at >= $2 AND u.created_at < $3)
+		FROM api_keys WHERE service = $1 AND revoked_at IS NULL ORDER BY created_at`, string(service), start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeySpend
+	for rows.Next() {
+		var spent string
+		k, err := scanKey(rows, &spent)
+		if err != nil {
+			return nil, err
+		}
+		d, err := decimal.NewFromString(spent)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, KeySpend{Key: k, Spent: d})
+	}
+	return out, rows.Err()
 }
