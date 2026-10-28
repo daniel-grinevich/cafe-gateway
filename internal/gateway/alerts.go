@@ -38,6 +38,7 @@ func (g *Gateway) afterSettle(ctx context.Context, key *store.APIKey, cap decima
 		g.Metrics.CostUSD.WithLabelValues(svc, row.Model, row.CostSource).Add(row.CostUSD.InexactFloat64())
 	}
 	g.setSpendGauges(key.Service, cap, s.ServiceAfter, decimal.Zero, false)
+	g.setKeyBudget(key, s.KeyAfter)
 	for _, pct := range crossed(cap, s.ServiceBefore, s.ServiceAfter) {
 		g.Metrics.CapAlerts.WithLabelValues(svc, strconv.Itoa(pct)).Inc()
 		slog.WarnContext(ctx, "service monthly spend crossed "+strconv.Itoa(pct)+"% of its cap",
@@ -59,6 +60,7 @@ func (g *Gateway) setSpendGauges(service config.Service, cap, spent, reserved de
 	if withReserved {
 		g.Metrics.ReservedUSD.WithLabelValues(svc).Set(reserved.InexactFloat64())
 	}
+	g.Users.CapRemaining.WithLabelValues(svc).Set(decimal.Max(decimal.Zero, cap.Sub(spent).Sub(reserved)).InexactFloat64())
 	ratio := 1.0
 	if cap.IsPositive() {
 		ratio = spent.Div(cap).InexactFloat64()
@@ -79,7 +81,24 @@ func (g *Gateway) RefreshSpend(ctx context.Context) error {
 		return err
 	}
 	g.setSpendGauges(g.service(), g.Cfg.MonthlyCap(g.service()), spent, held, true)
+	keys, err := g.Store.ActiveKeySpends(ctx, g.service(), now)
+	if err != nil {
+		return err
+	}
+	// Rebuild from scratch so revoked keys' series disappear.
+	g.Users.BudgetUSD.Reset()
+	g.Users.BudgetRemaining.Reset()
+	for _, k := range keys {
+		g.setKeyBudget(k.Key, k.Spent)
+	}
 	return nil
+}
+
+func (g *Gateway) setKeyBudget(key *store.APIKey, spent decimal.Decimal) {
+	svc := string(key.Service)
+	g.Users.BudgetUSD.WithLabelValues(svc, key.Name, key.KeyID).Set(key.MonthlyBudgetUSD.InexactFloat64())
+	g.Users.BudgetRemaining.WithLabelValues(svc, key.Name, key.KeyID).
+		Set(decimal.Max(decimal.Zero, key.MonthlyBudgetUSD.Sub(spent)).InexactFloat64())
 }
 
 // RunBackground refreshes gauges every interval until ctx is done.

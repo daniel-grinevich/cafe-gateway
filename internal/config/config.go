@@ -58,6 +58,8 @@ type Config struct {
 	// Which gateway this process serves (BARISTA_SERVICE).
 	Service Service
 	Addr    string
+	// Internal-only listener for per-key metrics ("" = off). Never route it through an ingress.
+	InternalMetricsAddr string
 
 	DatabaseURL   string
 	OpenRouterKey string // never logged
@@ -122,6 +124,7 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 	e := env{lookup: lookup}
 	c := &Config{
 		Addr:                       e.str("BARISTA_ADDR", ":8000"),
+		InternalMetricsAddr:        offIsEmpty(e.str("BARISTA_INTERNAL_METRICS_ADDR", ":9090")),
 		DatabaseURL:                NormalizeDatabaseURL(e.str("DATABASE_URL", "")),
 		OpenRouterKey:              e.str("OPEN_ROUTER_KEY", ""),
 		AdminToken:                 e.str("BARISTA_ADMIN_TOKEN", ""),
@@ -263,6 +266,14 @@ func (e *env) money(name, def string) decimal.Decimal {
 		return decimal.RequireFromString(def)
 	}
 	return d
+}
+
+// offIsEmpty lets an address be switched off with "off" (an empty env var means "use the default").
+func offIsEmpty(addr string) string {
+	if strings.EqualFold(addr, "off") {
+		return ""
+	}
+	return addr
 }
 
 func lower(items []string) []string {

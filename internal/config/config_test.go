@@ -15,6 +15,12 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if c.InternalMetricsAddr != ":9090" {
+		t.Fatalf("internal metrics addr = %q", c.InternalMetricsAddr)
+	}
+	if off, _ := load(t, map[string]string{"BARISTA_INTERNAL_METRICS_ADDR": "off"}); off.InternalMetricsAddr != "" {
+		t.Fatal("off should disable the internal listener")
+	}
 	if c.Service != Barista || c.Addr != ":8000" || c.OpenRouterDataCollection != "deny" || c.DebugStoreBodies {
 		t.Fatalf("defaults = %+v", c)
 	}

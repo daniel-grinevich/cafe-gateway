@@ -130,8 +130,32 @@ curl -s $URL/v1/admin/spend -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"   # 
   - `cafe_gateway_month_spend_usd`, `cafe_gateway_monthly_cap_usd`, `cafe_gateway_cap_used_ratio`,
     `cafe_gateway_reserved_usd`
   - `cafe_gateway_cost_usd_total`, `cafe_gateway_requests_total`, `cafe_gateway_cap_threshold_alerts_total`
-  - Labels are per service only; key names never appear.
+  - Labels are per service only; key names never appear, because this port is reachable over the tailnet.
   - Example alert: `cafe_gateway_cap_used_ratio > 0.8`.
+- **Per-user metrics on an internal-only port**, `BARISTA_INTERNAL_METRICS_ADDR` (default `:9090`, `off` disables).
+  `GET /metrics` there returns everything above plus the per-key series below. Scrape it inside the cluster and
+  never route it through an ingress.
+
+  | metric | type | labels |
+  |---|---|---|
+  | `cafe_gateway_user_requests_total` | counter | `service, key_name, key_id, surface, agent_id, model, status` |
+  | `cafe_gateway_user_errors_total` | counter | the same + `error_code` (status ≥ 400) |
+  | `cafe_gateway_user_request_duration_seconds` | histogram (0.25, 1, 2.5, 5, 10, 30 s) | `service, key_name, key_id, model` |
+  | `cafe_gateway_user_tokens_total` | counter | `service, key_name, key_id, surface, agent_id, model, direction` (`input`/`output`) |
+  | `cafe_gateway_user_spend_usd_total` | counter | `service, key_name, key_id, surface, agent_id, model` |
+  | `cafe_gateway_user_budget_usd` | gauge | `service, key_name, key_id` (active keys) |
+  | `cafe_gateway_user_budget_remaining_usd` | gauge | `service, key_name, key_id` (active keys) |
+  | `cafe_gateway_cap_remaining_usd` | gauge | `service` |
+
+  Cardinality is bounded:
+  - Requests without a valid key for that service all get `key_name`, `key_id`, `surface` and `agent_id` set to
+    `unauthenticated`. That covers a missing, unknown, forged or revoked key, or another service's key.
+  - Values that are missing get `none`.
+  - After a key's first 50 distinct (`surface`, `agent_id`) pairs, further pairs are counted under `other`.
+  - `model` is always an allow-listed model or `none`, and `status` is the HTTP status.
+  - The counters are per pod and start at 0 on restart, so use `sum(rate(...))` / `increase(...)`.
+  - The budget and cap gauges are recomputed from Postgres every 30 s and after each request. Use `max` across
+    pods.
 - **`data_collection: deny`** is forced onto every OpenRouter request (`OPENROUTER_DATA_COLLECTION`). A caller can't
   override it.
 - **Use a separate OpenRouter key per environment, each with an OpenRouter-side credit limit.** The gateway's caps

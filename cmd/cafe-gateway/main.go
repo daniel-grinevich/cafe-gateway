@@ -109,12 +109,19 @@ func serveCmd() *cobra.Command {
 				WriteTimeout:      cfg.UpstreamConnectTimeout + cfg.UpstreamReadTimeout*time.Duration(cfg.UpstreamMaxRetries+1) + 30*time.Second,
 				IdleTimeout:       120 * time.Second,
 			}
-			errc := make(chan error, 1)
+			errc := make(chan error, 2)
 			go func() { errc <- srv.ListenAndServe() }()
+			// Per-key metrics (friends' key names) on a separate, cluster-internal port.
+			var internal *http.Server
+			if cfg.InternalMetricsAddr != "" {
+				internal = &http.Server{Addr: cfg.InternalMetricsAddr, Handler: gw.InternalHandler(), ReadHeaderTimeout: 10 * time.Second}
+				go func() { errc <- internal.ListenAndServe() }()
+			}
 			slog.Info("serving", "service", string(cfg.Service), "addr", cfg.Addr,
 				"models", cfg.Models(cfg.Service), "monthly_cap_usd", cfg.MonthlyCap(cfg.Service).String(),
 				"data_collection", cfg.OpenRouterDataCollection, "upstream_configured", cfg.OpenRouterKey != "",
-				"admin_enabled", cfg.AdminToken != "", "debug_store_bodies", cfg.DebugStoreBodies)
+				"admin_enabled", cfg.AdminToken != "", "debug_store_bodies", cfg.DebugStoreBodies,
+				"internal_metrics_addr", cfg.InternalMetricsAddr)
 			select {
 			case err := <-errc:
 				return err
@@ -123,6 +130,9 @@ func serveCmd() *cobra.Command {
 			slog.Info("shutting down")
 			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
+			if internal != nil {
+				_ = internal.Shutdown(shutdownCtx)
+			}
 			return srv.Shutdown(shutdownCtx)
 		},
 	}

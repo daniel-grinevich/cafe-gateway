@@ -16,10 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/shopspring/decimal"
 
 	"github.com/daniel-grinevich/cafe-gateway/internal/config"
+	"github.com/daniel-grinevich/cafe-gateway/internal/metrics"
 	"github.com/daniel-grinevich/cafe-gateway/internal/store"
 )
 
@@ -45,10 +47,24 @@ func (g *Gateway) Handler() http.Handler {
 	return g.recoverer(g.logRequests(g.hostGuard(mux)))
 }
 
+// InternalHandler serves the internal-only listener: /metrics with everything on :8000's /metrics plus the per-key
+// series, and /health for probes. No host check: it must only be reachable inside the cluster.
+func (g *Gateway) InternalHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(prometheus.Gatherers{g.Metrics.Registry, g.Users.Registry}, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /health", g.health)
+	mux.HandleFunc("/", notFound)
+	return g.recoverer(mux)
+}
+
 // --- middleware ---
 
+// requestInfo is filled in by the handlers and read by logRequests (logs and metrics).
 type requestInfo struct {
-	keyID, surface, agent, code string
+	keyID, keyName, surface, agent, code string
+	model                                string
+	inputTokens, outputTokens            int
+	costUSD                              decimal.Decimal
 }
 
 type infoKey struct{}
@@ -88,6 +104,15 @@ func (g *Gateway) logRequests(next http.Handler) http.Handler {
 			}
 			g.Metrics.Requests.WithLabelValues(string(g.service()), strconv.Itoa(sw.status), code).Inc()
 			g.Metrics.Duration.WithLabelValues(string(g.service())).Observe(elapsed.Seconds())
+			labels := metrics.RequestLabels{
+				Service: string(g.service()), Model: info.model, Status: sw.status, ErrorCode: info.code,
+			}
+			// Only a key that authenticated for this service gets its own series; everything else is
+			// "unauthenticated", so random or forged keys can't create series.
+			if info.keyID != "" && info.keyID != "admin" {
+				labels.KeyName, labels.KeyID, labels.Surface, labels.AgentID = info.keyName, info.keyID, info.surface, info.agent
+			}
+			g.Users.ObserveRequest(labels, elapsed.Seconds(), info.inputTokens, info.outputTokens, info.costUSD.InexactFloat64())
 		}
 		level := slog.LevelInfo
 		if sw.status >= 500 {
