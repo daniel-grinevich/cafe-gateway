@@ -65,7 +65,11 @@ type mockOpenRouter struct {
 	headers map[string][]http.Header
 	// gate, when set, blocks each POST until it is closed or receives a value.
 	gate chan struct{}
+	// GETs of /api/v1/key (answered from replies[keyPath]).
+	keyPolls int
 }
+
+const keyPath = "/api/v1/key"
 
 func newMockOpenRouter(t *testing.T) *mockOpenRouter {
 	m := &mockOpenRouter{
@@ -78,6 +82,22 @@ func newMockOpenRouter(t *testing.T) *mockOpenRouter {
 	}
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == keyPath {
+			m.mu.Lock()
+			m.keyPolls++
+			queue := m.replies[keyPath]
+			reply := upstreamReply{404, map[string]any{"error": map[string]any{"message": "no route"}}}
+			if len(queue) > 0 {
+				reply = queue[0]
+				if len(queue) > 1 {
+					m.replies[keyPath] = queue[1:]
+				}
+			}
+			m.mu.Unlock()
+			w.WriteHeader(reply.status)
+			_ = json.NewEncoder(w).Encode(reply.body)
+			return
+		}
 		if r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"data": []}`))
 			return

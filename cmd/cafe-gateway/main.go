@@ -101,6 +101,7 @@ func serveCmd() *cobra.Command {
 			defer st.Close()
 			gw := gateway.New(cfg, st, openrouter.New(cfg, nil))
 			go gw.RunBackground(ctx, 30*time.Second)
+			go gw.RunCreditPoller(ctx)
 			srv := &http.Server{
 				Addr:              cfg.Addr,
 				Handler:           gw.Handler(),
@@ -121,7 +122,8 @@ func serveCmd() *cobra.Command {
 				"models", cfg.Models(cfg.Service), "monthly_cap_usd", cfg.MonthlyCap(cfg.Service).String(),
 				"data_collection", cfg.OpenRouterDataCollection, "upstream_configured", cfg.OpenRouterKey != "",
 				"admin_enabled", cfg.AdminToken != "", "debug_store_bodies", cfg.DebugStoreBodies,
-				"internal_metrics_addr", cfg.InternalMetricsAddr)
+				"internal_metrics_addr", cfg.InternalMetricsAddr, "openrouter_poll_s", cfg.OpenRouterPollInterval.Seconds(),
+				"openrouter_min_remaining_usd", cfg.OpenRouterMinRemaining.String())
 			select {
 			case err := <-errc:
 				return err
@@ -300,7 +302,7 @@ func usageCmd() *cobra.Command {
 			if by != "" && !slices.Contains(store.GroupBys, by) {
 				return fmt.Errorf("--by must be one of %s", strings.Join(store.GroupBys, ", "))
 			}
-			return withStore(cmd.Context(), func(_ *config.Config, st *store.Store) error {
+			return withStore(cmd.Context(), func(cfg *config.Config, st *store.Store) error {
 				f := store.UsageFilter{Month: month, Service: string(service)}
 				if keyID != "" {
 					key, err := st.KeyByKeyID(cmd.Context(), keyID)
@@ -313,7 +315,11 @@ func usageCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				printJSON(cmd.OutOrStdout(), report)
+				out := map[string]any{}
+				raw, _ := json.Marshal(report)
+				_ = json.Unmarshal(raw, &out)
+				out["openrouter_key"] = keyCredit(cmd.Context(), cfg)
+				printJSON(cmd.OutOrStdout(), out)
 				return nil
 			})
 		},
@@ -324,6 +330,17 @@ func usageCmd() *cobra.Command {
 	cmd.Flags().String("key", "", "only this key (key_id or prefix)")
 	cmd.Flags().String("by", "", "group by: "+strings.Join(store.GroupBys, "|"))
 	return cmd
+}
+
+// keyCredit is the shared OpenRouter key's live credit; a failure is reported, not fatal.
+func keyCredit(ctx context.Context, cfg *config.Config) map[string]any {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	info, err := openrouter.New(cfg, nil).KeyInfo(ctx)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return gateway.KeyCreditJSON(info, cfg.OpenRouterMinRemaining)
 }
 
 // healthcheckCmd lets the distroless image (no curl) run a Docker HEALTHCHECK.

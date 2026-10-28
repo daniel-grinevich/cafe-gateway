@@ -1,7 +1,7 @@
 // Package gateway is the request pipeline and HTTP API shared by barista (/v1/decide) and grinder (/v1/embed).
 //
 // Per request: auth (401, wrong service 403) -> attribution headers (400) -> body (422/400) -> scope (403)
-// -> rate limit (429) -> model allow-list (400) -> max tokens (413) -> reserve estimated cost against the key's
+// -> rate limit (429) -> model allow-list (400) -> max tokens (413) -> shared OpenRouter key credit floor (402) -> reserve estimated cost against the key's
 // budget and the service cap (402) -> OpenRouter -> settle the reservation with the real cost -> 80%/100% alerts.
 // Every step after auth writes a usage row, rejections included.
 package gateway
@@ -45,6 +45,9 @@ type Gateway struct {
 	// Per-key metrics, served only on the internal listener.
 	Users *metrics.Users
 	Now   func() time.Time
+
+	// The shared OpenRouter key's credit, from the last poll (credit.go).
+	credit creditState
 }
 
 func New(cfg *config.Config, st *store.Store, client *openrouter.Client) *Gateway {
@@ -347,6 +350,9 @@ func (g *Gateway) handleModelCall(ctx context.Context, key *store.APIKey, h http
 	}
 	if !g.Client.Configured() {
 		return reject(apiError(http.StatusServiceUnavailable, "upstream_not_configured", "OPEN_ROUTER_KEY is not configured."))
+	}
+	if e := g.creditBlock(); e != nil {
+		return reject(e)
 	}
 
 	estimate := g.Pricing.Estimate(ctx, model, c.inputTokens, c.outputAllowance)
