@@ -109,6 +109,16 @@ func Handler() http.Handler {
 	}
 	mux.HandleFunc("GET /api/v1/models", models)
 	mux.HandleFunc("GET /api/v1/embeddings/models", models)
+	// Key info, like GET https://openrouter.ai/api/v1/key: a $10 limit with plenty left.
+	mux.HandleFunc("GET /api/v1/key", func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(w, r) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+			"label": "sk-or-mock", "limit": 10, "limit_remaining": 9.5, "limit_reset": nil, "usage": 0.5,
+			"usage_daily": 0.01, "usage_weekly": 0.1, "usage_monthly": 0.5, "is_free_tier": false,
+		}})
+	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	return mux
 }

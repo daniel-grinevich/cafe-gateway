@@ -56,6 +56,10 @@ func TestKeysAndUsageCommands(t *testing.T) {
 		if err := json.Unmarshal([]byte(run(t, args...)), &report); err != nil || report["totals"] == nil {
 			t.Fatalf("%v: %v", args, err)
 		}
+		// No OPEN_ROUTER_KEY here: the credit section reports why instead of failing the command.
+		if c, _ := report["openrouter_key"].(map[string]any); c["error"] == nil {
+			t.Fatalf("%v: openrouter_key = %v", args, report["openrouter_key"])
+		}
 	}
 
 	root := newRoot()

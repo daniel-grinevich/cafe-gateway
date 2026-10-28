@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func load(t *testing.T, vars map[string]string) (*Config, error) {
@@ -29,6 +30,9 @@ func TestDefaults(t *testing.T) {
 	}
 	if c.BaristaMonthlyCap.String() != "10" || c.GrinderMonthlyCap.String() != "10" {
 		t.Fatal("caps should default low ($10)")
+	}
+	if c.OpenRouterPollInterval != 60*time.Second || c.OpenRouterMinRemaining.String() != "0.5" {
+		t.Fatalf("credit poll defaults = %v, %s", c.OpenRouterPollInterval, c.OpenRouterMinRemaining)
 	}
 }
 

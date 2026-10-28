@@ -74,6 +74,11 @@ type Config struct {
 	// Provider preference forced onto every upstream request; "" stops forcing it.
 	OpenRouterDataCollection string
 
+	// How often to poll OpenRouter's key endpoint for the shared key's real credit (0 = don't poll, no floor).
+	OpenRouterPollInterval time.Duration
+	// Below this much credit left on the key (last successful poll), upstream calls are refused with 402.
+	OpenRouterMinRemaining decimal.Decimal
+
 	UpstreamConnectTimeout time.Duration
 	UpstreamReadTimeout    time.Duration
 	UpstreamMaxRetries     int
@@ -134,6 +139,8 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 		OpenRouterAppURL:           e.str("OPENROUTER_APP_URL", "https://github.com/daniel-grinevich/cafe-gateway"),
 		OpenRouterAppTitle:         e.str("OPENROUTER_APP_TITLE", "cafe-gateway"),
 		OpenRouterDataCollection:   e.str("OPENROUTER_DATA_COLLECTION", "deny"),
+		OpenRouterPollInterval:     e.seconds("OPENROUTER_POLL_SECONDS", 60),
+		OpenRouterMinRemaining:     e.money("OPENROUTER_MIN_REMAINING_USD", "0.50"),
 		UpstreamConnectTimeout:     e.seconds("UPSTREAM_CONNECT_TIMEOUT_S", 5),
 		UpstreamReadTimeout:        e.seconds("UPSTREAM_READ_TIMEOUT_S", 60),
 		UpstreamMaxRetries:         e.int("UPSTREAM_MAX_RETRIES", 2),
@@ -168,7 +175,7 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 	}
 	for name, v := range map[string]decimal.Decimal{
 		"BARISTA_MONTHLY_CAP_USD": c.BaristaMonthlyCap, "GRINDER_MONTHLY_CAP_USD": c.GrinderMonthlyCap,
-		"DEFAULT_MONTHLY_BUDGET_USD": c.DefaultMonthlyBudget,
+		"DEFAULT_MONTHLY_BUDGET_USD": c.DefaultMonthlyBudget, "OPENROUTER_MIN_REMAINING_USD": c.OpenRouterMinRemaining,
 	} {
 		if v.IsNegative() {
 			e.errs = append(e.errs, fmt.Errorf("%s must not be negative", name))

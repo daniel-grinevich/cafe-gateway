@@ -29,7 +29,7 @@ func (g *Gateway) openapiSpec() map[string]any {
 	errs := map[string]any{
 		"400": errorResponse("Missing/invalid X-AGENT-* header, model not allowed, or upstream rejected the request"),
 		"401": errorResponse("Missing, unknown or revoked key"),
-		"402": errorResponse("Key budget or service monthly cap reached"),
+		"402": errorResponse("Key budget, service monthly cap or the shared OpenRouter credit floor reached"),
 		"403": errorResponse("Key is for the other service, or lacks the scope"),
 		"413": errorResponse("Request exceeds the key's max tokens per request"),
 		"422": errorResponse("Invalid request body"),

@@ -413,7 +413,7 @@ func (g *Gateway) adminUsage(w http.ResponseWriter, r *http.Request) {
 	g.writeReport(w, r, f, q.Get("by"), nil)
 }
 
-// adminSpend shows each service's month spend against its cap.
+// adminSpend shows each service's month spend against its cap, and the shared OpenRouter key's real credit.
 func (g *Gateway) adminSpend(w http.ResponseWriter, r *http.Request) {
 	now := g.Now()
 	month, _, _, _ := store.MonthBounds("", now)
@@ -432,5 +432,5 @@ func (g *Gateway) adminSpend(w http.ResponseWriter, r *http.Request) {
 			"status":        capStatus(spent, cap),
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"month": month, "services": services})
+	writeJSON(w, http.StatusOK, map[string]any{"month": month, "services": services, "openrouter_key": g.creditJSON(r.Context())})
 }

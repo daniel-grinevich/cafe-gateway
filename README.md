@@ -110,6 +110,7 @@ Every successful call returns `X-Cost-Usd` (what that call cost) and `X-Budget-R
 | 401 | `missing_api_key`, `invalid_api_key`, `revoked_api_key` | |
 | 402 | `budget_exceeded` | your key's monthly budget is used up (it resets on the 1st, UTC) |
 | 402 | `service_budget_exceeded` | the service hit its global monthly cap |
+| 402 | `upstream_credit_low` | the shared OpenRouter key is almost out of credit; calls resume once the owner tops it up |
 | 403 | `wrong_service` | a `grd_` key on barista, or the reverse |
 | 413 | `too_many_tokens` | the request is larger than your key's per-request limit |
 | 422 | `invalid_request` | the body is malformed |
@@ -142,8 +143,10 @@ curl -s -X POST $URL/v1/admin/keys -H "Authorization: Bearer $BARISTA_ADMIN_TOKE
 curl -s $URL/v1/admin/keys -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"
 curl -s -X POST $URL/v1/admin/keys/<key_id>/revoke -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"
 curl -s "$URL/v1/admin/usage?by=surface&service=grinder" -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"
-curl -s $URL/v1/admin/spend -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"   # month spend vs cap, per service
+curl -s $URL/v1/admin/spend -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"   # month spend vs cap, per service, + the OpenRouter key's real credit
 ```
+
+`cafe-gateway usage` also prints the key's live credit under `openrouter_key`.
 
 ## Money safety
 
@@ -193,9 +196,28 @@ curl -s $URL/v1/admin/spend -H "Authorization: Bearer $BARISTA_ADMIN_TOKEN"   # 
     pods.
 - **`data_collection: deny`** is forced onto every OpenRouter request (`OPENROUTER_DATA_COLLECTION`). A caller can't
   override it.
-- **Give the gateway its own OpenRouter key with an OpenRouter-side credit limit.** The gateway's caps protect
-  against callers. The credit limit on the key itself (openrouter.ai → Keys → credit limit) is the last line of
-  defense if the gateway is misconfigured or has a bug. Set it no higher than the sum of the two service caps.
+- **Shared key, real limit lives at OpenRouter.** `OPEN_ROUTER_KEY` has a credit limit (currently $10) and is
+  shared by barista, grinder, bean and later ledger. The gateway's caps only see the gateway's own spend, so every
+  pod also polls OpenRouter's [`GET /api/v1/key`](https://openrouter.ai/docs/api/reference/limits) every
+  `OPENROUTER_POLL_SECONDS` (default 60; `0` turns polling and the floor off), backing off up to 15 min while
+  polls fail. It reads `limit`, `limit_remaining`, `usage`, `usage_daily`, `usage_weekly` and `usage_monthly`.
+  - **Safety floor:** when the last successful poll shows less than `OPENROUTER_MIN_REMAINING_USD` (default $0.50)
+    left, model calls get `402 upstream_credit_low` without reaching OpenRouter. Crossing the floor logs one
+    `WARN` (`"event": "cafe_gateway_openrouter_credit_low"`). Calls resume on the first poll after credit is added
+    (`"event": "cafe_gateway_openrouter_credit_ok"`). The floor fails open: if the latest poll failed, nothing is
+    blocked (OpenRouter still enforces the hard limit), and `poll_success` drops to 0.
+  - **Alerts:** `WARN` logs when the key's usage crosses 80% and 95% of its limit
+    (`"event": "cafe_gateway_openrouter_key_threshold"`, `threshold_pct`), once per crossing per pod.
+  - **Metrics** (on both `/metrics` ports, no labels; every pod reports the same values, so use `max()`):
+    `cafe_gateway_openrouter_key_limit_usd`, `_usage_usd`, `_remaining_usd`, `_remaining_ratio`,
+    `_usage_daily_usd`, `_usage_weekly_usd`, `_usage_monthly_usd`, `_min_remaining_usd`, `_blocked` (0/1),
+    `_poll_success` (0/1), `_last_poll_timestamp_seconds` (last *successful* poll), and the counter
+    `cafe_gateway_openrouter_key_alerts_total{threshold_pct}`. Each gauge is absent until the first poll, and
+    limit/remaining/ratio stay absent for a key with no limit. Example alerts:
+    `max(cafe_gateway_openrouter_key_remaining_ratio) < 0.2`,
+    `time() - max(cafe_gateway_openrouter_key_last_poll_timestamp_seconds) > 600`.
+  - `GET /v1/admin/spend` and `cafe-gateway usage` show the same numbers under `openrouter_key`, with a `status`
+    of `ok`, `warning` (≥ 80% used), `critical` (≥ 95%), `below_floor` or `unlimited`.
 
 ## Configuration
 
@@ -203,7 +225,8 @@ See [`.env.example`](.env.example) for every variable and its default. In the cl
 
 - secrets: `OPEN_ROUTER_KEY`, `DATABASE_URL`, `BARISTA_ADMIN_TOKEN`, `POSTGRES_PASSWORD` (Infisical `/cafe-gateway`)
 - config: `BARISTA_MODELS`, `GRINDER_MODELS`, `BARISTA_MONTHLY_CAP_USD`, `GRINDER_MONTHLY_CAP_USD`,
-  `OPENROUTER_DATA_COLLECTION`, `BARISTA_DEBUG_STORE_BODIES`
+  `OPENROUTER_DATA_COLLECTION`, `BARISTA_DEBUG_STORE_BODIES`, `OPENROUTER_POLL_SECONDS`,
+  `OPENROUTER_MIN_REMAINING_USD`
 - per deployment: `BARISTA_SERVICE`
 
 ## Development
